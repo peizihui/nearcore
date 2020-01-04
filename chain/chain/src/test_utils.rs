@@ -12,12 +12,12 @@ use log::debug;
 use crate::chain::WEIGHT_MULTIPLIER;
 use crate::error::{Error, ErrorKind};
 use crate::store::ChainStoreAccess;
-use crate::types::{ApplyTransactionResult, BlockHeader, RuntimeAdapter};
+use crate::types::{ApplyTransactionResult, BlockHeader, RuntimeAdapter, Weight};
 use crate::{Chain, ChainGenesis};
-use near_crypto::{InMemorySigner, KeyType, PublicKey, SecretKey, Signature, Signer};
+use near_crypto::{InMemorySigner, KeyType, PublicKey, SecretKey, Signature};
 use near_pool::types::PoolIterator;
 use near_primitives::account::{AccessKey, Account};
-use near_primitives::block::{Approval, Block};
+use near_primitives::block::Approval;
 use near_primitives::challenge::{ChallengesResult, SlashedValidator};
 use near_primitives::errors::InvalidTxError;
 use near_primitives::hash::{hash, CryptoHash};
@@ -253,14 +253,18 @@ impl RuntimeAdapter for KeyValueRuntime {
         )
     }
 
-    fn verify_block_signature(&self, header: &BlockHeader) -> Result<(), Error> {
+    fn compute_block_weight(
+        &self,
+        prev_header: &BlockHeader,
+        header: &BlockHeader,
+    ) -> Result<Weight, Error> {
         let validators = &self.validators
             [self.get_epoch_and_valset(header.prev_hash).map_err(|err| err.to_string())?.1];
         let validator = &validators[(header.inner_lite.height as usize) % validators.len()];
         if !header.verify_block_producer(&validator.public_key) {
             return Err(ErrorKind::InvalidBlockProposer.into());
         }
-        Ok(())
+        Ok(prev_header.inner_rest.total_weight.next(header.num_approvals() as u128))
     }
 
     fn verify_validator_signature(
@@ -1036,15 +1040,6 @@ impl ChainGenesis {
             epoch_length: 5,
         }
     }
-}
-
-// Change the timestamp of a block so that it has a different hash
-// Note that it only works for tests that process blocks with `Provenance::PRODUCED`, since the
-// weights of blocks following `block` will be computed incorrectly.
-pub fn tamper_with_block(block: &mut Block, delta: u64, signer: &InMemorySigner) {
-    block.header.inner_lite.timestamp += delta;
-    block.header.init();
-    block.header.signature = signer.sign(block.header.hash().as_ref());
 }
 
 pub fn new_block_no_epoch_switches(
