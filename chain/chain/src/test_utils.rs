@@ -9,11 +9,10 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use chrono::Utc;
 use log::debug;
 
-use crate::chain::WEIGHT_MULTIPLIER;
 use crate::error::{Error, ErrorKind};
 use crate::store::ChainStoreAccess;
-use crate::types::{ApplyTransactionResult, BlockHeader, RuntimeAdapter, Weight};
-use crate::{Chain, ChainGenesis};
+use crate::types::{ApplyTransactionResult, BlockHeader, RuntimeAdapter};
+use crate::{Block, Chain, ChainGenesis};
 use near_crypto::{InMemorySigner, KeyType, PublicKey, SecretKey, Signature};
 use near_pool::types::PoolIterator;
 use near_primitives::account::{AccessKey, Account};
@@ -253,18 +252,14 @@ impl RuntimeAdapter for KeyValueRuntime {
         )
     }
 
-    fn compute_block_weight(
-        &self,
-        prev_header: &BlockHeader,
-        header: &BlockHeader,
-    ) -> Result<Weight, Error> {
+    fn verify_block_signature(&self, header: &BlockHeader) -> Result<(), Error> {
         let validators = &self.validators
             [self.get_epoch_and_valset(header.prev_hash).map_err(|err| err.to_string())?.1];
         let validator = &validators[(header.inner_lite.height as usize) % validators.len()];
         if !header.verify_block_producer(&validator.public_key) {
             return Err(ErrorKind::InvalidBlockProposer.into());
         }
-        Ok(prev_header.inner_rest.total_weight.next(header.num_approvals() as u128))
+        Ok(())
     }
 
     fn verify_validator_signature(
@@ -1047,10 +1042,7 @@ pub fn new_block_no_epoch_switches(
     height: BlockHeight,
     approvals: Vec<&str>,
     signer: &InMemorySigner,
-    time: u64,
-    time_delta: u128,
 ) -> Block {
-    let num_approvals = approvals.len() as u128;
     let approvals = approvals
         .into_iter()
         .map(|x| Approval::new(prev_block.hash(), prev_block.hash(), signer, x.to_string()))
@@ -1063,8 +1055,7 @@ pub fn new_block_no_epoch_switches(
             prev_block.header.inner_lite.next_epoch_id.clone(),
         )
     };
-    let weight_delta = std::cmp::max(1, num_approvals * WEIGHT_MULTIPLIER / 5);
-    let mut block = Block::produce(
+    Block::produce(
         &prev_block.header,
         height,
         prev_block.chunks.clone(),
@@ -1077,15 +1068,9 @@ pub fn new_block_no_epoch_switches(
         vec![],
         vec![],
         signer,
-        time_delta,
-        weight_delta,
         0.into(),
         CryptoHash::default(),
         CryptoHash::default(),
         prev_block.header.inner_lite.next_bp_hash.clone(),
-    );
-    block.header.inner_lite.timestamp = time;
-    block.header.init();
-    block.header.signature = signer.sign(block.header.hash.as_ref());
-    block
+    )
 }
