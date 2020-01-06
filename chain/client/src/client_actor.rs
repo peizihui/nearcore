@@ -19,13 +19,13 @@ use near_network::types::{AnnounceAccount, NetworkInfo, PeerId, ReasonForBan, St
 use near_network::{
     NetworkAdapter, NetworkClientMessages, NetworkClientResponses, NetworkRequests,
 };
-use near_primitives::block::GenesisId;
+use near_primitives::block::{GenesisId, WeightAndScore};
 use near_primitives::hash::CryptoHash;
 use near_primitives::types::{BlockHeight, EpochId};
 use near_primitives::unwrap_or_return;
 use near_primitives::utils::{from_timestamp, to_timestamp};
 use near_primitives::views::ValidatorInfo;
-use near_store::Store;
+use near_store::{ColBlock, Store};
 use near_telemetry::TelemetryActor;
 
 use crate::client::Client;
@@ -55,6 +55,10 @@ pub struct ClientActor {
     last_validator_announce_time: Option<Instant>,
     /// Info helper.
     info_helper: InfoHelper,
+
+    /// Adversarial controls
+    adv_sync_info: Option<(u64, u128, u128)>,
+    adv_disable_header_sync: bool,
 }
 
 fn wait_until_genesis(genesis_time: &DateTime<Utc>) {
@@ -110,6 +114,8 @@ impl ClientActor {
             last_validator_announce_height: None,
             last_validator_announce_time: None,
             info_helper,
+            adv_sync_info: None,
+            adv_disable_header_sync: false,
         })
     }
     fn check_signature_account_announce(
@@ -160,6 +166,60 @@ impl Handler<NetworkClientMessages> for ClientActor {
 
     fn handle(&mut self, msg: NetworkClientMessages, _ctx: &mut Context<Self>) -> Self::Result {
         match msg {
+            NetworkClientMessages::AdvSetSyncInfo(height, weight, score) => {
+                info!(target: "adversary", "Setting adversarial stats: ({}, {}, {})", height, weight, score);
+                self.adv_sync_info = Some((height, weight, score));
+                return NetworkClientResponses::NoResponse;
+            }
+            NetworkClientMessages::AdvDisableHeaderSync => {
+                info!(target: "adversary", "Blocking header sync");
+                self.adv_disable_header_sync = true;
+                return NetworkClientResponses::NoResponse;
+            }
+            NetworkClientMessages::AdvProduceBlocks(num_blocks, only_valid) => {
+                info!(target: "adversary", "Producing {} blocks", num_blocks);
+                self.client.adv_produce_blocks = true;
+                self.client.adv_produce_blocks_only_valid = only_valid;
+                let start_height =
+                    self.client.chain.mut_store().get_latest_known().unwrap().height + 1;
+                let mut blocks_produced = 0;
+                for height in start_height.. {
+                    let elapsed = self.client.config.max_block_production_delay;
+                    let block = self
+                        .client
+                        .produce_block(height, elapsed)
+                        .expect("block should be produced");
+                    if only_valid && block == None {
+                        continue;
+                    }
+                    let block = block.expect("block should exist after produced");
+                    info!(target: "adversary", "Producing {} block out of {}, height = {}", blocks_produced, num_blocks, height);
+                    self.network_adapter.do_send(NetworkRequests::Block { block: block.clone() });
+                    let (accepted_blocks, _) =
+                        self.client.process_block(block, Provenance::PRODUCED);
+                    for accepted_block in accepted_blocks {
+                        self.client.on_block_accepted(
+                            accepted_block.hash,
+                            accepted_block.status,
+                            accepted_block.provenance,
+                        );
+                    }
+                    blocks_produced += 1;
+                    if blocks_produced == num_blocks {
+                        break;
+                    }
+                }
+                return NetworkClientResponses::NoResponse;
+            }
+            NetworkClientMessages::AdvGetSavedBlocks => {
+                info!(target: "adversary", "Requested number of saved blocks");
+                let store = self.client.chain.store().store();
+                let mut num_blocks = 0;
+                for _ in store.iter(ColBlock) {
+                    num_blocks += 1;
+                }
+                return NetworkClientResponses::AdvU64(num_blocks);
+            }
             NetworkClientMessages::Transaction(tx) => self.client.process_tx(tx),
             NetworkClientMessages::BlockHeader(header, peer_id) => {
                 self.receive_header(header, peer_id)
@@ -188,10 +248,14 @@ impl Handler<NetworkClientMessages> for ClientActor {
                 }
             }
             NetworkClientMessages::BlockHeadersRequest(hashes) => {
-                if let Ok(headers) = self.retrieve_headers(hashes) {
-                    NetworkClientResponses::BlockHeaders(headers)
-                } else {
+                if self.adv_disable_header_sync {
                     NetworkClientResponses::NoResponse
+                } else {
+                    if let Ok(headers) = self.retrieve_headers(hashes) {
+                        NetworkClientResponses::BlockHeaders(headers)
+                    } else {
+                        NetworkClientResponses::NoResponse
+                    }
                 }
             }
             NetworkClientMessages::GetChainInfo => match self.client.chain.head() {
@@ -200,8 +264,16 @@ impl Handler<NetworkClientMessages> for ClientActor {
                         chain_id: self.client.config.chain_id.clone(),
                         hash: self.client.chain.genesis().hash(),
                     },
-                    height: head.height,
-                    weight_and_score: head.weight_and_score,
+                    height: if let Some((height, _, _)) = self.adv_sync_info {
+                        height
+                    } else {
+                        head.height
+                    },
+                    weight_and_score: if let Some((_, weight, score)) = self.adv_sync_info {
+                        WeightAndScore { score: score.into(), weight: weight.into() }
+                    } else {
+                        head.weight_and_score
+                    },
                     tracked_shards: self.client.config.tracked_shards.clone(),
                 },
                 Err(err) => {
@@ -1023,7 +1095,7 @@ impl ClientActor {
         let currently_syncing = self.client.sync_status.is_syncing();
         let (needs_syncing, highest_height) = unwrap_or_run_later!(self.needs_syncing());
 
-        if !needs_syncing {
+        if !needs_syncing || self.adv_disable_header_sync {
             if currently_syncing {
                 debug!(
                     target: "client",

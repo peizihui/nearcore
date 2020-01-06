@@ -1193,6 +1193,12 @@ pub struct StateResponseInfo {
 // TODO(#1313): Use Box
 #[allow(clippy::large_enum_variant)]
 pub enum NetworkClientMessages {
+    /// Adversarial controls
+    AdvSetSyncInfo(u64, u128, u128),
+    AdvDisableHeaderSync,
+    AdvProduceBlocks(u64, bool),
+    AdvGetSavedBlocks,
+
     /// Received transaction.
     Transaction(SignedTransaction),
     /// Received block header.
@@ -1233,6 +1239,9 @@ pub enum NetworkClientMessages {
 #[derive(Eq, PartialEq, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum NetworkClientResponses {
+    /// Adv controls.
+    AdvU64(u64),
+
     /// No response.
     NoResponse,
     /// Valid transaction inserted into mempool as response to Transaction.

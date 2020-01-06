@@ -5,7 +5,7 @@ use std::path::Path;
 
 use actix::System;
 use clap::{crate_version, App, AppSettings, Arg, SubCommand};
-use log::{info, LevelFilter};
+use log::{error, info, LevelFilter};
 
 use git_version::git_version;
 use near::config::init_testnet_configs;
@@ -83,6 +83,8 @@ fn main() {
         .get_matches();
 
     init_logging(matches.value_of("verbose"));
+
+    error!("THIS IS A NODE COMPILED WITH ADVERSARIAL BEHAVIORS. DO NOT USE IN PRODUCTION.");
 
     let home_dir = matches.value_of("home").map(|dir| Path::new(dir)).unwrap();
 
