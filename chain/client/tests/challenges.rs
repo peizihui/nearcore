@@ -11,7 +11,8 @@ use near::{GenesisConfig, NightshadeRuntime};
 use near_chain::chain::BlockEconomicsConfig;
 use near_chain::validate::validate_challenge;
 use near_chain::{
-    Block, ChainGenesis, ChainStoreAccess, Error, ErrorKind, Provenance, RuntimeAdapter,
+    Block, ChainGenesis, ChainStoreAccess, DoomslugThresholdMode, Error, ErrorKind, Provenance,
+    RuntimeAdapter,
 };
 use near_client::test_utils::{MockNetworkAdapter, TestEnv};
 use near_client::Client;
@@ -55,6 +56,7 @@ fn test_verify_block_double_sign_challenge() {
         vec![],
         &signer,
         0.into(),
+        CryptoHash::default(),
         CryptoHash::default(),
         CryptoHash::default(),
         b1.header.inner_lite.next_bp_hash.clone(),
@@ -223,6 +225,7 @@ fn create_chunk(
         &*client.block_producer.as_ref().unwrap().signer,
         0.into(),
         last_block.header.prev_hash,
+        CryptoHash::default(),
         CryptoHash::default(),
         last_block.header.inner_lite.next_bp_hash,
     );
@@ -497,6 +500,7 @@ fn test_verify_chunk_invalid_state_challenge() {
         0.into(),
         last_block.header.prev_hash,
         prev_to_last_block.header.prev_hash,
+        last_block.header.inner_rest.last_ds_final_block,
         last_block.header.inner_lite.next_bp_hash,
     );
 
@@ -516,6 +520,7 @@ fn test_verify_chunk_invalid_state_challenge() {
             validity_period,
             epoch_length,
             &BlockEconomicsConfig { gas_price_adjustment_rate: 0, min_gas_price: 0 },
+            DoomslugThresholdMode::SingleApproval,
         );
 
         chain_update

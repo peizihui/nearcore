@@ -77,6 +77,7 @@ impl ClientActor {
         network_adapter: Arc<dyn NetworkAdapter>,
         block_producer: Option<BlockProducer>,
         telemetry_actor: Addr<TelemetryActor>,
+        enable_doomslug: bool,
     ) -> Result<Self, Error> {
         wait_until_genesis(&chain_genesis.time);
         if let Some(bp) = &block_producer {
@@ -90,6 +91,7 @@ impl ClientActor {
             runtime_adapter,
             network_adapter.clone(),
             block_producer,
+            enable_doomslug,
         )?;
 
         Ok(ClientActor {
@@ -812,6 +814,10 @@ impl ClientActor {
             });
             return;
         }
+
+        // Start doomslug timer
+        self.doomslug_timer(ctx);
+
         // Start main sync loop.
         self.sync(ctx);
     }
@@ -851,6 +857,34 @@ impl ClientActor {
         };
         ctx.run_later(self.client.config.chunk_request_retry_period, move |act, ctx| {
             act.chunk_request_retry(ctx);
+        });
+    }
+
+    /// An actix recursive function that processes doomslug timer
+    fn doomslug_timer(&mut self, ctx: &mut Context<ClientActor>) {
+        let _ = self.client.check_and_update_doomslug_tip();
+
+        let approvals = self.client.doomslug.process_timer(Instant::now());
+
+        // Important to save the largest skipped height before sending approvals, so that if the
+        // node crashes in the meantime, we cannot get slashed on recovery
+        let mut chain_store_update = self.client.chain.mut_store().store_update();
+        chain_store_update
+            .save_largest_skipped_height(&self.client.doomslug.get_largest_skipped_height());
+
+        match chain_store_update.commit() {
+            Ok(_) => {
+                for approval in approvals {
+                    if let Err(e) = self.client.send_approval(approval) {
+                        error!("Error while sending an approval {:?}", e);
+                    }
+                }
+            }
+            Err(e) => error!("Error while committing largest skipped height {:?}", e),
+        };
+
+        ctx.run_later(Duration::from_millis(50), move |act, ctx| {
+            act.doomslug_timer(ctx);
         });
     }
 

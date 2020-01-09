@@ -39,6 +39,7 @@ fn produce_two_blocks() {
             vec!["test"],
             "test",
             true,
+            false,
             Box::new(move |msg, _ctx, _| {
                 if let NetworkRequests::Block { .. } = msg {
                     count.fetch_add(1, Ordering::Relaxed);
@@ -67,6 +68,7 @@ fn produce_blocks_with_tx() {
             vec!["test"],
             "test",
             true,
+            false,
             Box::new(move |msg, _ctx, _| {
                 if let NetworkRequests::PartialEncodedChunkMessage {
                     account_id: _,
@@ -126,6 +128,7 @@ fn receive_network_block() {
             vec!["test2", "test1", "test3"],
             "test2",
             true,
+            false,
             Box::new(move |msg, _ctx, _| {
                 if let NetworkRequests::BlockHeaderAnnounce { approval_message, .. } = msg {
                     assert!(approval_message.is_some());
@@ -157,6 +160,7 @@ fn receive_network_block() {
                 0.into(),
                 CryptoHash::default(),
                 CryptoHash::default(),
+                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             client.do_send(NetworkClientMessages::Block(block, PeerInfo::random().id, false));
@@ -178,6 +182,7 @@ fn receive_network_block_header() {
             vec!["test"],
             "other",
             true,
+            false,
             Box::new(move |msg, _ctx, client_addr| match msg {
                 NetworkRequests::BlockRequest { hash, peer_id } => {
                     let block = block_holder1.read().unwrap().clone().unwrap();
@@ -219,6 +224,7 @@ fn receive_network_block_header() {
                 0.into(),
                 CryptoHash::default(),
                 CryptoHash::default(),
+                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             client.do_send(NetworkClientMessages::BlockHeader(
@@ -245,6 +251,7 @@ fn produce_block_with_approvals() {
             validators.clone(),
             "test1",
             true,
+            false,
             Box::new(move |msg, _ctx, _| {
                 if let NetworkRequests::Block { block } = msg {
                     if block.header.num_approvals() == validators.len() as u64 - 1 {
@@ -290,12 +297,20 @@ fn produce_block_with_approvals() {
                 0.into(),
                 CryptoHash::default(),
                 CryptoHash::default(),
+                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             for i in 3..11 {
                 let s = if i > 10 { "test1".to_string() } else { format!("test{}", i) };
                 let signer = InMemorySigner::from_seed(&s, KeyType::ED25519, &s);
-                let approval = Approval::new(block.hash(), block.hash(), &signer, s.to_string());
+                let approval = Approval::new(
+                    block.hash(),
+                    Some(block.hash()),
+                    block.header.inner_lite.height + 1,
+                    true,
+                    &signer,
+                    s.to_string(),
+                );
                 client
                     .do_send(NetworkClientMessages::BlockApproval(approval, PeerInfo::random().id));
             }
@@ -317,6 +332,7 @@ fn invalid_blocks() {
         let (client, view_client) = setup_mock(
             vec!["test"],
             "other",
+            false,
             false,
             Box::new(move |msg, _ctx, _client_actor| {
                 match msg {
@@ -358,6 +374,7 @@ fn invalid_blocks() {
                 0.into(),
                 CryptoHash::default(),
                 CryptoHash::default(),
+                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             block.header.inner_lite.prev_state_root = hash(&[1]);
@@ -387,6 +404,7 @@ fn invalid_blocks() {
                 0.into(),
                 CryptoHash::default(),
                 CryptoHash::default(),
+                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             client.do_send(NetworkClientMessages::Block(block2, PeerInfo::random().id, false));
@@ -411,6 +429,7 @@ fn invalid_blocks() {
                 0.into(),
                 CryptoHash::default(),
                 CryptoHash::default(),
+                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             client.do_send(NetworkClientMessages::Block(block3, PeerInfo::random().id, false));
@@ -431,6 +450,7 @@ fn skip_block_production() {
             vec!["test1", "test2"],
             "test2",
             true,
+            false,
             Box::new(move |msg, _ctx, _client_actor| {
                 match msg {
                     NetworkRequests::Block { block } => {
@@ -458,6 +478,7 @@ fn client_sync_headers() {
         let (client, _) = setup_mock(
             vec!["test"],
             "other",
+            false,
             false,
             Box::new(move |msg, _ctx, _client_actor| match msg {
                 NetworkRequests::BlockHeadersRequest { hashes, peer_id } => {
@@ -531,6 +552,7 @@ fn test_process_invalid_tx() {
         1,
         1,
         Some("test1"),
+        false,
         network_adapter,
         chain_genesis,
     );
@@ -575,6 +597,7 @@ fn test_time_attack() {
         1,
         1,
         Some("test1"),
+        false,
         network_adapter,
         chain_genesis,
     );
@@ -606,6 +629,7 @@ fn test_invalid_approvals() {
         1,
         1,
         Some("test1"),
+        false,
         network_adapter,
         chain_genesis,
     );
@@ -615,14 +639,19 @@ fn test_invalid_approvals() {
     b1.header.inner_rest.approvals = (0..100)
         .map(|i| Approval {
             account_id: format!("test{}", i).to_string(),
-            reference_hash: genesis.hash(),
+            reference_hash: Some(genesis.hash()),
             parent_hash: genesis.hash(),
+            target_height: 1,
+            is_endorsement: true,
             signature: InMemorySigner::from_seed(
                 &format!("test{}", i),
                 KeyType::ED25519,
                 &format!("test{}", i),
             )
-            .sign(Approval::get_data_for_sig(&genesis.hash(), &genesis.hash()).as_ref()),
+            .sign(
+                Approval::get_data_for_sig(&genesis.hash(), &Some(genesis.hash()), 1, true)
+                    .as_ref(),
+            ),
         })
         .collect();
     let hash = hash(&b1.header.inner_rest.try_to_vec().expect("Failed to serialize"));
@@ -659,6 +688,7 @@ fn test_invalid_gas_price() {
         1,
         1,
         Some("test1"),
+        false,
         network_adapter,
         chain_genesis,
     );

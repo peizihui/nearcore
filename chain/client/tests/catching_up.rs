@@ -141,6 +141,7 @@ mod tests {
                 false,
                 false,
                 5,
+                false,
                 Arc::new(RwLock::new(move |_account_id: String, msg: &NetworkRequests| {
                     let account_from = "test3.3".to_string();
                     let account_to = "test1.1".to_string();
@@ -413,6 +414,7 @@ mod tests {
                 false,
                 false,
                 5,
+                false,
                 Arc::new(RwLock::new(move |_account_id: String, msg: &NetworkRequests| {
                     let mut seen_heights_same_block = seen_heights_same_block.write().unwrap();
                     let mut phase = phase.write().unwrap();
@@ -622,6 +624,7 @@ mod tests {
                 false,
                 false,
                 5,
+                false,
                 Arc::new(RwLock::new(move |_account_id: String, msg: &NetworkRequests| {
                     if let NetworkRequests::Block { block } = msg {
                         check_height(block.hash(), block.header.inner_lite.height);

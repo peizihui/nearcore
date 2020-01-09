@@ -103,6 +103,7 @@ fn chunks_produced_and_distributed_common(
             false,
             false,
             5,
+            false,
             Arc::new(RwLock::new(move |from_whom: String, msg: &NetworkRequests| {
                 match msg {
                     NetworkRequests::Block { block } => {

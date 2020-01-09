@@ -12,7 +12,7 @@ use log::debug;
 use crate::error::{Error, ErrorKind};
 use crate::store::ChainStoreAccess;
 use crate::types::{ApplyTransactionResult, BlockHeader, RuntimeAdapter};
-use crate::{Block, Chain, ChainGenesis};
+use crate::{Block, Chain, ChainGenesis, DoomslugThresholdMode};
 use near_crypto::{InMemorySigner, KeyType, PublicKey, SecretKey, Signature};
 use near_pool::types::PoolIterator;
 use near_primitives::account::{AccessKey, Account};
@@ -881,6 +881,7 @@ pub fn setup_with_tx_validity_period(
         store,
         runtime.clone(),
         &ChainGenesis::new(Utc::now(), 1_000_000, 100, 1_000_000_000, 0, 0, tx_validity_period, 10),
+        DoomslugThresholdMode::SingleApproval,
     )
     .unwrap();
     let signer = Arc::new(InMemorySigner::from_seed("test", KeyType::ED25519, "test"));
@@ -919,6 +920,7 @@ pub fn setup_with_validators(
             tx_validity_period,
             epoch_length,
         ),
+        DoomslugThresholdMode::SingleApproval,
     )
     .unwrap();
     (chain, runtime, signers)
@@ -1045,7 +1047,16 @@ pub fn new_block_no_epoch_switches(
 ) -> Block {
     let approvals = approvals
         .into_iter()
-        .map(|x| Approval::new(prev_block.hash(), prev_block.hash(), signer, x.to_string()))
+        .map(|x| {
+            Approval::new(
+                prev_block.hash(),
+                Some(prev_block.hash()),
+                height,
+                true,
+                signer,
+                x.to_string(),
+            )
+        })
         .collect();
     let (epoch_id, next_epoch_id) = if prev_block.header.prev_hash == CryptoHash::default() {
         (prev_block.header.inner_lite.next_epoch_id.clone(), EpochId(prev_block.hash()))
@@ -1069,6 +1080,7 @@ pub fn new_block_no_epoch_switches(
         vec![],
         signer,
         0.into(),
+        CryptoHash::default(),
         CryptoHash::default(),
         CryptoHash::default(),
         prev_block.header.inner_lite.next_bp_hash.clone(),

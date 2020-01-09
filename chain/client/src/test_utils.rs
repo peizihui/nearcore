@@ -11,7 +11,7 @@ use futures::{future, future::BoxFuture, FutureExt};
 use rand::{thread_rng, Rng};
 
 use near_chain::test_utils::KeyValueRuntime;
-use near_chain::{Chain, ChainGenesis, Provenance, RuntimeAdapter};
+use near_chain::{Chain, ChainGenesis, DoomslugThresholdMode, Provenance, RuntimeAdapter};
 use near_crypto::{InMemorySigner, KeyType, PublicKey};
 use near_network::types::{
     AccountOrPeerIdOrHash, NetworkInfo, NetworkViewClientMessages, NetworkViewClientResponses,
@@ -72,6 +72,7 @@ pub fn setup(
     skip_sync_wait: bool,
     min_block_prod_time: u64,
     max_block_prod_time: u64,
+    enable_doomslug: bool,
     network_adapter: Arc<dyn NetworkAdapter>,
     transaction_validity_period: NumBlocks,
     genesis_time: DateTime<Utc>,
@@ -95,7 +96,14 @@ pub fn setup(
         transaction_validity_period,
         epoch_length,
     );
-    let mut chain = Chain::new(store.clone(), runtime.clone(), &chain_genesis).unwrap();
+    let doomslug_threshold_mode = if enable_doomslug {
+        DoomslugThresholdMode::HalfStake
+    } else {
+        DoomslugThresholdMode::SingleApproval
+    };
+    let mut chain =
+        Chain::new(store.clone(), runtime.clone(), &chain_genesis, doomslug_threshold_mode)
+            .unwrap();
     let genesis_block = chain.get_block(&chain.genesis().hash()).unwrap().clone();
 
     let signer = Arc::new(InMemorySigner::from_seed(account_id, KeyType::ED25519, account_id));
@@ -124,6 +132,7 @@ pub fn setup(
         network_adapter,
         Some(signer.into()),
         telemetry,
+        enable_doomslug,
     )
     .unwrap();
     (genesis_block, client, view_client)
@@ -134,6 +143,7 @@ pub fn setup_mock(
     validators: Vec<&'static str>,
     account_id: &'static str,
     skip_sync_wait: bool,
+    enable_doomslug: bool,
     network_mock: Box<
         dyn FnMut(
             &NetworkRequests,
@@ -142,13 +152,21 @@ pub fn setup_mock(
         ) -> NetworkResponses,
     >,
 ) -> (Addr<ClientActor>, Addr<ViewClientActor>) {
-    setup_mock_with_validity_period(validators, account_id, skip_sync_wait, network_mock, 100)
+    setup_mock_with_validity_period(
+        validators,
+        account_id,
+        skip_sync_wait,
+        enable_doomslug,
+        network_mock,
+        100,
+    )
 }
 
 pub fn setup_mock_with_validity_period(
     validators: Vec<&'static str>,
     account_id: &'static str,
     skip_sync_wait: bool,
+    enable_doomslug: bool,
     mut network_mock: Box<
         dyn FnMut(
             &NetworkRequests,
@@ -168,6 +186,7 @@ pub fn setup_mock_with_validity_period(
         skip_sync_wait,
         100,
         200,
+        enable_doomslug,
         network_adapter.clone(),
         transaction_validity_period,
         Utc::now(),
@@ -233,6 +252,7 @@ pub fn setup_mock_all_validators(
     drop_chunks: bool,
     tamper_with_fg: bool,
     epoch_length: BlockHeightDelta,
+    enable_doomslug: bool,
     network_mock: Arc<RwLock<dyn FnMut(String, &NetworkRequests) -> (NetworkResponses, bool)>>,
 ) -> (Block, Vec<(Addr<ClientActor>, Addr<ViewClientActor>)>) {
     let validators_clone = validators.clone();
@@ -552,36 +572,43 @@ pub fn setup_mock_all_validators(
 
                             // Ensure the finality gadget invariant that no two approvals intersect
                             //     is maintained
-                            let hh = hash_to_score1.read().unwrap();
-                            let arange =
-                                (hh.get(&approval.reference_hash), hh.get(&approval.parent_hash));
-                            if let (Some(left), Some(right)) = arange {
-                                let arange = (*left, *right);
-                                assert!(arange.0 <= arange.1);
+                            // MOO add here also the doomslug invariant
+                            if approval.reference_hash.is_some() {
+                                let hh = hash_to_score1.read().unwrap();
+                                let arange = (
+                                    hh.get(&approval.reference_hash.unwrap()),
+                                    hh.get(&approval.parent_hash),
+                                );
+                                if let (Some(left), Some(right)) = arange {
+                                    let arange = (*left, *right);
+                                    assert!(arange.0 <= arange.1);
 
-                                let approval_intervals =
-                                    &mut approval_intervals1.write().unwrap()[my_ord];
-                                let prev = approval_intervals
-                                    .range((Unbounded, Excluded((arange.0, arange.0))))
-                                    .next_back();
-                                let mut next_score_and_height = arange.0;
-                                next_score_and_height.height += 1;
-                                let next = approval_intervals
-                                    .range((
-                                        Included((next_score_and_height, next_score_and_height)),
-                                        Unbounded,
-                                    ))
-                                    .next();
+                                    let approval_intervals =
+                                        &mut approval_intervals1.write().unwrap()[my_ord];
+                                    let prev = approval_intervals
+                                        .range((Unbounded, Excluded((arange.0, arange.0))))
+                                        .next_back();
+                                    let mut next_score_and_height = arange.0;
+                                    next_score_and_height.height += 1;
+                                    let next = approval_intervals
+                                        .range((
+                                            Included((
+                                                next_score_and_height,
+                                                next_score_and_height,
+                                            )),
+                                            Unbounded,
+                                        ))
+                                        .next();
 
-                                if let Some(prev) = prev {
-                                    assert!(prev.1 < arange.0);
+                                    if let Some(prev) = prev {
+                                        assert!(prev.1 < arange.0);
+                                    }
+                                    if let Some(next) = next {
+                                        assert!(next.0 > arange.1);
+                                    }
+
+                                    approval_intervals.insert(arange);
                                 }
-
-                                if let Some(next) = next {
-                                    assert!(next.0 > arange.1);
-                                }
-
-                                approval_intervals.insert(arange);
                             }
                         }
                         NetworkRequests::ForwardTx(_, _)
@@ -619,6 +646,7 @@ pub fn setup_mock_all_validators(
                 // When not tampering with fg, make the relationship between constants closer to the
                 //     actual relationship.
                 if tamper_with_fg { block_prod_time } else { block_prod_time * 2 },
+                enable_doomslug,
                 Arc::new(network_adapter),
                 10000,
                 genesis_time,
@@ -645,8 +673,15 @@ pub fn setup_no_network(
     validators: Vec<&'static str>,
     account_id: &'static str,
     skip_sync_wait: bool,
+    enable_doomslug: bool,
 ) -> (Addr<ClientActor>, Addr<ViewClientActor>) {
-    setup_no_network_with_validity_period(validators, account_id, skip_sync_wait, 100)
+    setup_no_network_with_validity_period(
+        validators,
+        account_id,
+        skip_sync_wait,
+        100,
+        enable_doomslug,
+    )
 }
 
 pub fn setup_no_network_with_validity_period(
@@ -654,11 +689,13 @@ pub fn setup_no_network_with_validity_period(
     account_id: &'static str,
     skip_sync_wait: bool,
     transaction_validity_period: NumBlocks,
+    enable_doomslug: bool,
 ) -> (Addr<ClientActor>, Addr<ViewClientActor>) {
     setup_mock_with_validity_period(
         validators,
         account_id,
         skip_sync_wait,
+        enable_doomslug,
         Box::new(|_, _, _| NetworkResponses::NoResponse),
         transaction_validity_period,
     )
@@ -674,6 +711,7 @@ pub fn setup_client_with_runtime(
     store: Arc<Store>,
     num_validator_seats: NumSeats,
     account_id: Option<&str>,
+    enable_doomslug: bool,
     network_adapter: Arc<dyn NetworkAdapter>,
     chain_genesis: ChainGenesis,
     runtime_adapter: Arc<dyn RuntimeAdapter>,
@@ -682,9 +720,16 @@ pub fn setup_client_with_runtime(
         account_id.map(|x| Arc::new(InMemorySigner::from_seed(x, KeyType::ED25519, x)).into());
     let mut config = ClientConfig::test(true, 10, 20, num_validator_seats);
     config.epoch_length = chain_genesis.epoch_length;
-    let mut client =
-        Client::new(config, store, chain_genesis, runtime_adapter, network_adapter, block_producer)
-            .unwrap();
+    let mut client = Client::new(
+        config,
+        store,
+        chain_genesis,
+        runtime_adapter,
+        network_adapter,
+        block_producer,
+        enable_doomslug,
+    )
+    .unwrap();
     client.sync_status = SyncStatus::NoSync;
     client
 }
@@ -695,6 +740,7 @@ pub fn setup_client(
     validator_groups: u64,
     num_shards: NumShards,
     account_id: Option<&str>,
+    enable_doomslug: bool,
     network_adapter: Arc<dyn NetworkAdapter>,
     chain_genesis: ChainGenesis,
 ) -> Client {
@@ -710,6 +756,7 @@ pub fn setup_client(
         store,
         num_validator_seats,
         account_id,
+        enable_doomslug,
         network_adapter,
         chain_genesis,
         runtime_adapter,
@@ -738,6 +785,7 @@ impl TestEnv {
                     1,
                     1,
                     Some(&format!("test{}", i)),
+                    false,
                     network_adapters[i].clone(),
                     chain_genesis.clone(),
                 )
@@ -779,6 +827,7 @@ impl TestEnv {
                     store.clone(),
                     num_validator_seats,
                     Some(&format!("test{}", i)),
+                    false,
                     network_adapters[i].clone(),
                     chain_genesis.clone(),
                     runtime_adapters[i].clone(),
@@ -828,6 +877,7 @@ impl TestEnv {
             1,
             1,
             Some(&format!("test{}", id)),
+            false,
             self.network_adapters[id].clone(),
             self.chain_genesis.clone(),
         )

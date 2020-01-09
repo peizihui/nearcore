@@ -55,6 +55,7 @@ fn add_blocks(
             0.into(),
             CryptoHash::default(),
             CryptoHash::default(),
+            CryptoHash::default(),
             Chain::compute_bp_hash_inner(&vec![ValidatorStake {
                 account_id: "other".to_string(),
                 public_key: signer.public_key(),

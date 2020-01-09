@@ -33,6 +33,7 @@ fn test_keyvalue_runtime_balances() {
             false,
             false,
             5,
+            false,
             Arc::new(RwLock::new(move |_account_id: String, _msg: &NetworkRequests| {
                 (NetworkResponses::NoResponse, true)
             })),
@@ -398,6 +399,7 @@ mod tests {
                 drop_chunks,
                 true,
                 20,
+                false,
                 Arc::new(RwLock::new(move |_account_id: String, _msg: &NetworkRequests| {
                     (NetworkResponses::NoResponse, true)
                 })),
